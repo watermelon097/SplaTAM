@@ -29,7 +29,7 @@ from utils.eval_helpers import report_loss, report_progress, eval
 from utils.keyframe_selection import keyframe_selection_overlap
 from utils.recon_helpers import setup_camera
 from utils.slam_helpers import (
-    transformed_params2rendervar, transformed_params2depthplussilhouette,
+    transformed_params2rendervar, transformed_params2depthplussilhouette, transformed_semanticparams2rendervar,
     transform_to_frame, l1_loss_v1, matrix_to_quaternion
 )
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
@@ -64,7 +64,7 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
         raise ValueError(f"Unknown dataset name {config_dict['dataset_name']}")
 
 
-def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, 
+def get_pointcloud(color, depth, semantic, intrinsics, w2c, transform_pts=True, 
                    mask=None, compute_mean_sq_dist=False, mean_sq_dist_method="projective"):
     width, height = color.shape[2], color.shape[1]
     CX = intrinsics[0][2]
@@ -104,6 +104,10 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
     # Colorize point cloud
     cols = torch.permute(color, (1, 2, 0)).reshape(-1, 3) # (C, H, W) -> (H, W, C) -> (H * W, C)
     point_cld = torch.cat((pts, cols), -1)
+    
+    # Semantic point cloud
+    semantic = torch.permute(color, (1, 2, 0)).reshape(-1, 3) # (C, H, W) -> (H, W, C) -> (H * W, C)
+    point_cld = torch.cat((point_cld, semantic), -1)
 
     # Select points based on mask
     if mask is not None:
@@ -131,6 +135,7 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
     params = {
         'means3D': means3D,
         'rgb_colors': init_pt_cld[:, 3:6],
+        'semantic_colors': init_pt_cld[:, 6:9],
         'unnorm_rotations': unnorm_rots,
         'logit_opacities': logit_opacities,
         'log_scales': log_scales,
@@ -169,10 +174,11 @@ def initialize_optimizer(params, lrs_dict, tracking):
 def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio, 
                               mean_sq_dist_method, densify_dataset=None, gaussian_distribution=None):
     # Get RGB-D Data & Camera Parameters
-    color, depth, intrinsics, pose = dataset[0]
+    color, depth, semantic, intrinsics, pose = dataset[0]
 
     # Process RGB-D Data
     color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+    semantic = semantic.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
     depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
     
     # Process Camera Parameters
@@ -195,7 +201,7 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
     # Get Initial Point Cloud (PyTorch CUDA Tensor)
     mask = (depth > 0) # Mask out invalid depth values
     mask = mask.reshape(-1)
-    init_pt_cld, mean3_sq_dist = get_pointcloud(color, depth, densify_intrinsics, w2c, 
+    init_pt_cld, mean3_sq_dist = get_pointcloud(color, depth, semantic, densify_intrinsics, w2c, 
                                                 mask=mask, compute_mean_sq_dist=True, 
                                                 mean_sq_dist_method=mean_sq_dist_method)
 
@@ -243,11 +249,17 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     rendervar = transformed_params2rendervar(params, transformed_gaussians)
     depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
                                                                  transformed_gaussians)
+    semantic_rendervar = transformed_semanticparams2rendervar(params, transformed_gaussians)
 
     # RGB Rendering
     rendervar['means2D'].retain_grad()
     im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
     variables['means2D'] = rendervar['means2D']  # Gradient only accum from colour render for densification
+    
+    # Semantic Rendering
+    semantic_rendervar['means2D'].retain_grad()
+    sem_im, sem_radius, _, = Renderer(raster_settings=curr_data['cam'])(**semantic_rendervar)
+    variables['means2D'] = semantic_rendervar['means2D']  # Gradient only accum from colour render for densification
 
     # Depth & Silhouette Rendering
     depth_sil, _, _, = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
@@ -288,7 +300,17 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         losses['im'] = torch.abs(curr_data['im'] - im).sum()
     else:
         losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
+        
 
+    # Semantic Loss
+    if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
+        color_mask = torch.tile(mask, (3, 1, 1))
+        color_mask = color_mask.detach()
+        losses['semantic'] = torch.abs(curr_data['semantic'] - sem_im)[color_mask].sum()
+    elif tracking:
+        losses['semantic'] = torch.abs(curr_data['semantic'] - sem_im).sum()
+    else:
+        losses['semantic'] = 0.8 * l1_loss_v1(sem_im, curr_data['semantic']) + 0.2 * (1.0 - calc_ssim(sem_im, curr_data['semantic']))
     # Visualize the Diff Images
     if tracking and visualize_tracking_loss:
         fig, ax = plt.subplots(2, 4, figsize=(12, 6))
@@ -361,6 +383,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
     params = {
         'means3D': means3D,
         'rgb_colors': new_pt_cld[:, 3:6],
+        'semantic_colors': new_pt_cld[:, 6:9],
         'unnorm_rotations': unnorm_rots,
         'logit_opacities': logit_opacities,
         'log_scales': log_scales,
@@ -404,7 +427,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
         curr_w2c[:3, 3] = curr_cam_tran
         valid_depth_mask = (curr_data['depth'][0, :, :] > 0)
         non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
-        new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
+        new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['semantic'], curr_data['intrinsics'], 
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
                                     mean_sq_dist_method=mean_sq_dist_method)
         new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution)
@@ -618,7 +641,7 @@ def rgbd_slam(config: dict):
         # Update the ground truth poses list
         for time_idx in range(checkpoint_time_idx):
             # Load RGBD frames incrementally instead of all frames
-            color, depth, _, gt_pose = dataset[time_idx]
+            color, depth, semantic, _, gt_pose = dataset[time_idx]
             # Process poses
             gt_w2c = torch.linalg.inv(gt_pose)
             gt_w2c_all_frames.append(gt_w2c)
@@ -632,8 +655,9 @@ def rgbd_slam(config: dict):
                 curr_w2c[:3, 3] = curr_cam_tran
                 # Initialize Keyframe Info
                 color = color.permute(2, 0, 1) / 255
+                semantic = semantic.permute(2, 0, 1) / 255
                 depth = depth.permute(2, 0, 1)
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
+                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth, 'semantic': semantic}
                 # Add to keyframe list
                 keyframe_list.append(curr_keyframe)
     else:
@@ -642,18 +666,19 @@ def rgbd_slam(config: dict):
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
         # Load RGBD frames incrementally instead of all frames
-        color, depth, _, gt_pose = dataset[time_idx]
+        color, depth, semantic, _, gt_pose = dataset[time_idx]
         # Process poses
         gt_w2c = torch.linalg.inv(gt_pose)
         # Process RGB-D Data
         color = color.permute(2, 0, 1) / 255
+        semantic = semantic.permute(2, 0, 1) / 255
         depth = depth.permute(2, 0, 1)
         gt_w2c_all_frames.append(gt_w2c)
         curr_gt_w2c = gt_w2c_all_frames
         # Optimize only current time step for tracking
         iter_time_idx = time_idx
         # Initialize Mapping Data for selected frame
-        curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': iter_time_idx, 'intrinsics': intrinsics, 
+        curr_data = {'cam': cam, 'im': color, 'depth': depth, 'semantic': semantic, 'id': iter_time_idx, 'intrinsics': intrinsics, 
                      'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
         
         # Initialize Data for Tracking
@@ -834,14 +859,16 @@ def rgbd_slam(config: dict):
                     # Use Current Frame Data
                     iter_time_idx = time_idx
                     iter_color = color
+                    iter_semantic = semantic
                     iter_depth = depth
                 else:
                     # Use Keyframe Data
                     iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
                     iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
+                    iter_semantic = keyframe_list[selected_rand_keyframe_idx]['semantic']
                     iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
                 iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
-                iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
+                iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'semantic' : iter_semantic, 'id': iter_time_idx, 
                              'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
                 # Loss for current frame
                 loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
@@ -919,7 +946,7 @@ def rgbd_slam(config: dict):
                 curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
                 curr_w2c[:3, 3] = curr_cam_tran
                 # Initialize Keyframe Info
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
+                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth, 'semantic': semantic}
                 # Add to keyframe list
                 keyframe_list.append(curr_keyframe)
                 keyframe_time_indices.append(time_idx)
