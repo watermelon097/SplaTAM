@@ -556,7 +556,7 @@ def rgbd_slam(config: dict):
     num_frames = dataset_config["num_frames"]
     if num_frames == -1:
         num_frames = len(dataset)
-
+    num_frames = 5
     # Init seperate dataloader for densification if required
     if seperate_densification_res:
         densify_dataset = get_dataset(
