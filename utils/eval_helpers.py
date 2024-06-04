@@ -409,13 +409,14 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
          mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False):
     print("Evaluating Final Parameters ...")
     psnr_list = []
-    psnr_list = []
     rmse_list = []
     l1_list = []
     lpips_list = []
-    lpips_semantic_list = []
     ssim_list = []
-    ssim_semantic_list = []
+    psnr_semantic_list=[]
+    ssim_semantic_list=[]
+    lpips_semantic_list=[]
+        
     plot_dir = os.path.join(eval_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
     if save_frames:
@@ -494,10 +495,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         ssim_list.append(ssim.cpu().numpy())
         lpips_list.append(lpips_score)
         
-        psnr_semantic_list=[]
-        ssim_semantic_list=[]
-        lpips_semantic_list=[]
-        
+
         # Render Semantic and Calculate PSNR
         semantic_im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**semantic_rendervar)
         if mapping_iters==0 and not add_new_gaussians:
@@ -506,15 +504,15 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         else:
             weighted_im = semantic_im * valid_depth_mask
             weighted_gt_im = curr_data['semantic'] * valid_depth_mask
-        psnr = calc_psnr(weighted_im, weighted_gt_im).mean()
-        ssim = ms_ssim(weighted_im.unsqueeze(0).cpu(), weighted_gt_im.unsqueeze(0).cpu(), 
+        psnr_semantic = calc_psnr(weighted_im, weighted_gt_im).mean()
+        ssim_semantic = ms_ssim(weighted_im.unsqueeze(0).cpu(), weighted_gt_im.unsqueeze(0).cpu(), 
                         data_range=1.0, size_average=True)
-        lpips_score = loss_fn_alex(torch.clamp(weighted_im.unsqueeze(0), 0.0, 1.0),
+        lpips_score_semantic = loss_fn_alex(torch.clamp(weighted_im.unsqueeze(0), 0.0, 1.0),
                                     torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
 
-        psnr_semantic_list.append(psnr.cpu().numpy())
-        ssim_semantic_list.append(ssim.cpu().numpy())
-        lpips_semantic_list.append(lpips_score)
+        psnr_semantic_list.append(psnr_semantic.cpu().numpy())
+        ssim_semantic_list.append(ssim_semantic.cpu().numpy())
+        lpips_semantic_list.append(lpips_score_semantic)
 
         # Compute Depth RMSE
         if mapping_iters==0 and not add_new_gaussians:
@@ -612,6 +610,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
     lpips_list = np.array(lpips_list)
     lpips_semantic_list = np.array(lpips_semantic_list)
     avg_psnr = psnr_list.mean()
+    avg_semantic_psnr = psnr_semantic_list.mean()
     avg_rmse = rmse_list.mean()
     avg_l1 = l1_list.mean()
     avg_ssim = ssim_list.mean()
@@ -619,6 +618,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
     avg_semantic_ssim = ssim_semantic_list.mean()
     avg_semantic_lpips = lpips_semantic_list.mean()
     print("Average PSNR: {:.2f}".format(avg_psnr))
+    print("Average Semantic PSNR: {:.2f}".format(avg_semantic_psnr))
     print("Average Depth RMSE: {:.2f} cm".format(avg_rmse*100))
     print("Average Depth L1: {:.2f} cm".format(avg_l1*100))
     print("Average MS-SSIM: {:.3f}".format(avg_ssim))
@@ -636,13 +636,16 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
 
     # Save metric lists as text files
     np.savetxt(os.path.join(eval_dir, "psnr.txt"), psnr_list)
+    np.savetxt(os.path.join(eval_dir, "psnr_semantic.txt"), psnr_semantic_list)
+
     np.savetxt(os.path.join(eval_dir, "rmse.txt"), rmse_list)
     np.savetxt(os.path.join(eval_dir, "l1.txt"), l1_list)
     np.savetxt(os.path.join(eval_dir, "ssim.txt"), ssim_list)
     np.savetxt(os.path.join(eval_dir, "lpips.txt"), lpips_list)
-
+    np.savetxt(os.path.join(eval_dir, "ssim_semantic.txt"), ssim_semantic_list)
+    np.savetxt(os.path.join(eval_dir, "lpips_semantic.txt"), lpips_semantic_list)
     # Plot PSNR & L1 as line plots
-    fig, axs = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axs = plt.subplots(1, 3, figsize=(12, 4))
     axs[0].plot(np.arange(len(psnr_list)), psnr_list)
     axs[0].set_title("RGB PSNR")
     axs[0].set_xlabel("Time Step")
@@ -651,7 +654,11 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
     axs[1].set_title("Depth L1")
     axs[1].set_xlabel("Time Step")
     axs[1].set_ylabel("L1 (cm)")
-    fig.suptitle("Average PSNR: {:.2f}, Average Depth L1: {:.2f} cm, ATE RMSE: {:.2f} cm".format(avg_psnr, avg_l1*100, ate_rmse*100), y=1.05, fontsize=16)
+    axs[2].plot(np.arange(len(psnr_semantic_list)), psnr_semantic_list)
+    axs[2].set_title("Semantic PSNR")
+    axs[2].set_xlabel("Time Step")
+    axs[2].set_ylabel("PSNR")
+    fig.suptitle("Average PSNR: {:.2f}, Average Depth L1: {:.2f} cm, Average Semantic PSNR: {:.2f},  ATE RMSE: {:.2f} cm".format(avg_psnr, avg_l1*100, avg_semantic_psnr, ate_rmse*100), y=1.05, fontsize=16)
     plt.savefig(os.path.join(eval_dir, "metrics.png"), bbox_inches='tight')
     if wandb_run is not None:
         wandb_run.log({"Eval/Metrics": fig})
