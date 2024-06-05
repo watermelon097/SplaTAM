@@ -3,7 +3,7 @@ from os.path import join as p_join
 
 scenes = ["room0", "room1", "room2",
           "office0", "office1", "office2",
-          "office_", "office4"]
+          "office3", "office4"]
 
 primary_device="cuda:0"
 seed = int(os.environ["SEED"])
@@ -66,11 +66,13 @@ config = dict(
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=0.5,
+            emantic=0.5,
             depth=1.0,
         ),
         lrs=dict(
             means3D=0.0,
             rgb_colors=0.0,
+            semantic_colors=0.0,
             unnorm_rotations=0.0,
             logit_opacities=0.0,
             log_scales=0.0,
@@ -87,11 +89,13 @@ config = dict(
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=0.5,
+            semantic=0.5,
             depth=1.0,
         ),
         lrs=dict(
             means3D=0.0001,
             rgb_colors=0.0025,
+            semantic_colors=0.0025,
             unnorm_rotations=0.001,
             logit_opacities=0.05,
             log_scales=0.001,

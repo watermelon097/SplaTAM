@@ -3,7 +3,7 @@ from os.path import join as p_join
 
 scenes = ["room0", "room1", "room2",
           "office0", "office1", "office2",
-          "office_", "office4"]
+          "office3", "office4"]
 
 primary_device="cuda:0"
 seed = 0
