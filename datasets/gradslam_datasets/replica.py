@@ -111,15 +111,18 @@ class ReplicaV2Dataset(GradSLAMDataset):
         if self.use_train_split:
             color_paths = natsorted(glob.glob(f"{self.input_folder}/rgb/rgb_*.png"))
             depth_paths = natsorted(glob.glob(f"{self.input_folder}/depth/depth_*.png"))
+            semantic_paths = natsorted(glob.glob(f"{self.input_folder}/semantic_class/vis_sem_class_*.png"))
+
         else:
             first_train_color_path = f"{self.train_input_folder}/rgb/rgb_0.png"
             first_train_depth_path = f"{self.train_input_folder}/depth/depth_0.png"
             color_paths = [first_train_color_path] + natsorted(glob.glob(f"{self.input_folder}/rgb/rgb_*.png"))
             depth_paths = [first_train_depth_path] + natsorted(glob.glob(f"{self.input_folder}/depth/depth_*.png"))
+            semantic_paths = [first_train_depth_path]+ natsorted(glob.glob(f"{self.input_folder}/semantic_class/vis_sem_class_*.png"))
         embedding_paths = None
         if self.load_embeddings:
             embedding_paths = natsorted(glob.glob(f"{self.input_folder}/{self.embedding_dir}/*.pt"))
-        return color_paths, depth_paths, embedding_paths
+        return color_paths, depth_paths, semantic_paths, embedding_paths
 
     def load_poses(self):
         poses = []
